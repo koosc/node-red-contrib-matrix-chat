@@ -630,6 +630,31 @@ module.exports = function(RED) {
                     request.__nrSeenAt = Date.now();
 
                     let verifierHooked = false;
+                    // Track the last emitted phase so repeated Change events
+                    // within the same phase don't re-emit duplicate updates.
+                    // In particular, RustVerificationRequest fires Change when
+                    // accept() transitions the inner Rust state to Ready while
+                    // request.phase still reports Requested (accepting === true),
+                    // which would otherwise emit "requested" twice and cause a
+                    // downstream accept node to throw.
+                    let lastPhase = null;
+                    function emitPhaseIfChanged() {
+                        let phase;
+                        try {
+                            phase = request.phase;
+                        } catch(e) {
+                            node.error("Failed to process verification update: " + e);
+                            return;
+                        }
+                        if(phase === lastPhase) {
+                            return;
+                        }
+                        // Set before emitting: a synchronous listener (e.g. an
+                        // auto-accept flow) can trigger a re-entrant Change
+                        // before emitVerificationUpdate returns.
+                        lastPhase = phase;
+                        emitVerificationUpdate(request, false);
+                    }
                     const onChange = function() {
                         try {
                             // Once a verifier exists, hook its SAS event so the
@@ -642,7 +667,7 @@ module.exports = function(RED) {
                                     emitVerificationUpdate(request, true);
                                 });
                             }
-                            emitVerificationUpdate(request, false);
+                            emitPhaseIfChanged();
                             if(request.phase === VerificationPhase.Done || request.phase === VerificationPhase.Cancelled) {
                                 request.off(VerificationRequestEvent.Change, onChange);
                                 // Keep the finished request briefly so the config
@@ -658,7 +683,7 @@ module.exports = function(RED) {
                         }
                     };
                     request.on(VerificationRequestEvent.Change, onChange);
-                    emitVerificationUpdate(request, false);
+                    emitPhaseIfChanged();
                 };
 
                 // Resolve the real homeserver via .well-known discovery so a
